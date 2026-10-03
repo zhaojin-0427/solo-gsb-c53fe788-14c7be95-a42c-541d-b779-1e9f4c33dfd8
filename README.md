@@ -4,6 +4,8 @@
 
 此外内置 **印刷配置版本发布与回归门禁** 模块：把同一配置族的候选印刷 ICC 存为按 SHA-256 固定的草稿，从已保存的代表性任务固化门禁基线，服务按草稿快照自动重跑并逐项给出 ΔE 均值 / P95 / 超阈面积比例 / 遮罩变化像素的通过-失败判定与变化像素定位；**全部通过才能在事务中发布为当前版本**，发布、撤回、恢复（回滚）均带期望版本号并发控制并写不可变哈希链审计。
 
+软打样页还提供 **局部 CMYK 修色**：从**已保存任务**框选不超过 **64×64** 像素的矩形，给定目标 Lab、ΔE00 容差、单通道偏移绝对值上限（0–8）与总墨量上限（0–1020），后端以**原任务分色结果为起点、按原印刷 ICC** 穷举搜索一个对选区每个像素统一施加的**整数 CMYK 偏移**；逐像素满足通道 0–255、偏移及总墨量约束后，以 LittleCMS 回算选区平均 Lab，按「目标 ΔE00 → 偏移绝对值和 → (C,M,Y,K) 字典序」择优。**无可行解或最优解未达容差时标记“不可达”且不生成成品**；达标时导出**选区外 CMYK 字节与原分色逐字节一致、嵌入原印刷 ICC 的 TIFF** 及记录原任务/ICC 摘要/约束/偏移的报告。原任务印刷 ICC **缺失或 SHA-256 摘要不符一律拒绝**。
+
 - 后端：Python 3.12 · FastAPI · SQLite · liblcms2 直接 ctypes（高精度 Lab）+ Pillow（图像 I/O/ImageCms）· NumPy
 - 前端：原生 HTML / CSS / JavaScript（无框架、无构建步骤）
 - 部署：Docker Compose 一键启动
@@ -24,7 +26,7 @@ docker compose up -d --build
 
 页面顶部导航可在两个视图间切换：
 
-- **软打样**：上传图像、选择配置/意图/阈值，生成软打样与 ΔE 分析；
+- **软打样**：上传图像、选择配置/意图/阈值，生成软打样与 ΔE 分析；在结果图上框选区域做局部统计，并可对**已保存任务**做**局部 CMYK 修色**（详见下文）；也可从「从已保存任务打开」下拉直接载入历史任务再框选修色；
 - **印刷配置版本发布与回归门禁**：配置族、草稿、基线、门禁结果、版本发布/撤回/回滚与审计。
 
 停止：
@@ -86,6 +88,32 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - 印刷 **CMYK（C,M,Y,K 百分比，0% 无墨 / 100% 满版）**均值与最大；
 - 区域 ΔE00 均值 / P95 / 最大 / 超阈值面积比例；
 - 5×5 采样网格的各阶段数值。
+
+### 局部 CMYK 修色（统一整数偏移搜索）
+
+用于在不改版的前提下，对小块区域做整体追色。操作流程：
+
+1. 先「生成软打样」保存一个任务，或在控制面板的 **从已保存任务打开** 下拉中选择历史任务；
+2. 在结果图上**框选不超过 64×64 像素的矩形**（坐标自动回填；也可手工输入），点击 **用选区修色前平均 Lab 填充目标** 或直接填写：
+   - **目标 Lab**：`L∈[0,100]`、`a/b∈[-128,127]`；
+   - **ΔE00 容差**：非负数；
+   - **通道偏移绝对值上限**：0–8 的整数（每个通道 `|Δ|` 的上限）；
+   - **总墨量上限**：0–1020 的整数（四通道字节值之和的逐像素上限）；
+3. 点击 **搜索统一 CMYK 偏移**。后端以**原任务分色结果为起点**，在 `(2s+1)^4`（s≤8，最多 17⁴=83 521）个**整数偏移**中穷举，并按**原印刷 ICC**（LittleCMS `TYPE_Lab_DBL`）回算 Lab：
+   - 对选区**每个像素**：结果通道 `原值+偏移` 必须保持 **0–255（不做钳制）**、`|偏移通道|≤上限`、四通道之和 ≤ 总墨量上限；
+   - 达标判据：**选区平均 Lab 与目标 Lab 的 CIEDE2000 ≤ 容差**（平均按像素等权）；
+   - 择优严格按 **① 目标 ΔE00 → ② 偏移绝对值之和 → ③ (C,M,Y,K) 字典序** 取最小；
+4. 页面显示**修色前/修色后选区软打样**（像素化放大）、修色后整图软打样、统一偏移、修色前后平均 Lab，以及两种残余色差：
+   - 逐像素/平均**对目标**的 ΔE00（均值/P95/最大）；
+   - 修色后相对修色前的 **残余 ΔE00**（均值/P95/最大）；
+5. **不可达**（红色标记）分两种：`no_feasible_solution`（约束下不存在可行偏移）与 `tolerance_missed`（最优可行偏移仍超容差）——均**不生成 TIFF 与成品报告**，但仍给出最优可行偏移的前后软打样供判断；
+6. **达标**时可下载：
+   - `corrected_cmyk.tif`：全图分色 TIFF，**选区外 CMYK 字节与原分色逐字节一致**、选区内为原字节加统一整数偏移，**嵌入原任务印刷 ICC**（LZW 压缩；0=无墨/255=满版的 lcms 约定，不做通道反转）；
+   - `correction_report.json`：记录**原任务**（job_id、原图哈希、尺寸/模式、两个渲染意图、阈值）、**三份 ICC 摘要**（名称/类/色彩空间/SHA-256）、选区与**全部约束**、搜索空间规模/择优规则、**最终偏移**、修色前后平均 Lab 与残余色差、成品 TIFF 的 SHA-256 及“选区外字节不变”标志。
+
+**ICC 绑定校验**：修色只认原任务记录的印刷/显示 ICC。服务端比对当前文件的 SHA-256 与任务 `report.json` 记录的摘要——**印刷 ICC 缺失或摘要不符（或显示 ICC 缺失/不符）返回 `409` 并拒绝修色**，杜绝换配置后误用旧分色。相同请求（任务+选区+目标+约束）得到确定性的 `retouch_id` 与字节级一致的结果。
+
+> 性能说明：可行性筛选是 O(候选数) 的区间/标量运算；Lab 回算只对选区内**唯一 CMYK 颜色**做。普通照片选区（唯一色远少于 4096）通常亚秒级；最坏情形（64×64 噪声图含 4096 个唯一色且数千候选可行）按核并行回算，约数秒至数十秒。
 
 ### 导出
 
@@ -211,6 +239,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | GET | `/api/jobs/{id}/report` | 下载 report.json |
 | GET | `/api/jobs/{id}/export.zip` | 全部 PNG + JSON 打包下载 |
 | POST | `/api/jobs/{id}/region` | 区域分析，body：`{x,y,width,height}` |
+| POST | `/api/jobs/{id}/retouch` | 局部 CMYK 修色搜索，body：`{x,y,width,height,target_lab:[L,a,b],tolerance_de,max_shift,total_ink_limit}`（见下）；原任务 ICC 缺失/摘要不符返回 409 |
+| GET | `/api/jobs/{id}/retouch/{rid}` | 修色结果 JSON（含状态、偏移、前后 Lab、残余色差、产物链接） |
+| GET | `/api/jobs/{id}/retouch/{rid}/images/{name}.png` | `before_crop` / `after_crop` / `after` 软打样 PNG（嵌入显示 ICC） |
+| GET | `/api/jobs/{id}/retouch/{rid}/corrected_cmyk.tif` | 成品 TIFF（仅达标存在，否则 404；选区外字节不变、嵌入印刷 ICC） |
+| GET | `/api/jobs/{id}/retouch/{rid}/correction_report.json` | 修色报告（仅达标存在，否则 404） |
 
 ### 发布与回归门禁 API（前缀 `/api/release`）
 
@@ -235,7 +268,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/versions/{vid}/restore` | 恢复/回滚到历史版本，body：`{expected_revision, reason?}` |
 | GET | `/audit?family_id=&limit=` | 哈希链不可变审计列表 |
 
-错误码：请求语义/状态非法 `422`，资源不存在 `404`，期望版本号冲突 `409`。
+错误码：请求语义/状态非法 `422`，资源不存在 `404`，期望版本号冲突 `409`；局部修色中原任务 ICC 缺失或摘要不符也返回 `409`。
+
+`POST /api/jobs/{id}/retouch` JSON 字段：
+
+- `x,y,width,height`：选区（整数；1≤width,height≤64，不得越界）；
+- `target_lab`：`[L,a,b]`，L 0–100、a/b −128–127；
+- `tolerance_de`：非负 ΔE00 容差；
+- `max_shift`：每通道偏移绝对值上限（0–8 整数）；
+- `total_ink_limit`：总墨量上限（0–1020 整数）。
+
+返回 `status` 为 `reached` / `unreachable`（`reason=no_feasible_solution|tolerance_missed`）。
 
 `POST /api/jobs` 表单字段：
 
@@ -251,7 +294,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - **色差公式**：`app/colorscience.py` 中为矢量化 CIEDE2000，已对照 Sharma 等 (2005) 标准测试数据验证（最大偏差 < 1e-3）。
 - **Lab 精度**：源色与印后色由 `app/lcms_native.py` 直接 ctypes 调用 `liblcms2`，以 `cmsCreateTransform` + `TYPE_Lab_DBL`（native C double，D50 CIELAB）取回；ΔE00、热图、遮罩、统计、框选区域与 `report.json` 共用这同一份未量化结果，落盘的 Lab/ΔE 数组也以 float64 保存。仅保留 ICC v2 8 位 Lab 编解码函数用于与历史路径对比的测试。
-- **合成 CMYK 配置**：`app/lcms_native.py` 通过 ctypes 调用系统 `liblcms2` 的 `cmsCreateProfilePlaceholder` / CLUT16 pipeline API 生成 17³/17⁴ 网格的合法 ICC v2.4 CMYK 配置，保证开箱演示可用。
+- **合成 CMYK 配置**：`app/lcms_native.py` 通过 ctypes 调用系统 `liblcms2` 的 `cmsCreateProfilePlaceholder` / CLUT16 pipeline API 生成 17³/17⁴ 网格的合法 ICC v2.4 CMYK 配置，保证开箱演示可用。合成配置在落内存字节时统一清零 ICC 头 24–35 字节的创建时间字段，保证内置 sRGB/Lab/演示配置**跨重启字节级稳定**（否则 lcms 会写入墙钟时间，导致 SHA-256 摘要每次启动漂移、破坏任务绑定）。
+- **局部 CMYK 修色**：见 `app/retouch.py`（穷举搜索、区间化可行性筛选、按唯一颜色回算 Lab、线程池并行、成品导出）与 `app/main.py` 中的 `/retouch` 路由；`DeviceToLabTransform`（`app/lcms_native.py`）提供可重复调用的设备 8 位→`TYPE_Lab_DBL` 转换句柄。
 - **环境变量**：
   - `SPD_DATA_DIR`（默认 `./data`）：数据根目录；
   - `SPD_MAX_DIMENSION`（默认 `3000`）：允许的图像最长边像素；
@@ -266,14 +310,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 │   ├── release_api.py   # 发布/门禁 HTTP API
 │   ├── releases.py      # 配置族/草稿/基线/门禁/发布/撤回/恢复/审计 服务
 │   ├── pipeline.py      # 色彩流水线、导出（支持按快照字节重跑）
+│   ├── retouch.py       # 局部 CMYK 修色：统一整数偏移穷举搜索/约束/择优/TIFF 与报告
 │   ├── colorscience.py  # CIEDE2000、热图（高精度 Lab 由 lcms_native 取得）
 │   ├── profiles.py      # ICC 配置管理与严格校验
 │   ├── regions.py       # 框选区域统计
 │   ├── database.py      # SQLite（含发布模块表、不可变审计触发器、写事务锁）
-│   ├── lcms_native.py   # liblcms2 ctypes 绑定（TYPE_Lab_DBL 高精度转换）、内置配置生成
+│   ├── lcms_native.py   # liblcms2 ctypes 绑定（TYPE_Lab_DBL、可复用 transform、内置配置生成）
 │   ├── config.py
-│   └── static/          # 前端（软打样 + 发布门禁两个视图）
-├── tests/               # pytest 端到端测试（软打样 + 发布门禁）
+│   └── static/          # 前端（软打样 + 局部修色 + 发布门禁视图）
+├── tests/               # pytest 端到端测试（软打样 + 局部修色 + 发布门禁）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -286,4 +331,4 @@ pip install -r requirements.txt pytest httpx
 pytest -q
 ```
 
-测试覆盖：软打样原有全链路与校验（25 项），以及发布门禁模块（配置族/草稿 CMYK 校验、基线固化与参数校验、相同快照通过、异配置检出变化像素并拒绝发布、门禁 run 确定性与历史复现、发布后配置可选与不可变文件名、期望版本号 409、撤回/恢复状态机、审计哈希链与 UPDATE/DELETE 触发器拦截）。
+测试覆盖：软打样原有全链路与校验，发布门禁模块（配置族/草稿 CMYK 校验、基线固化与参数校验、相同快照通过、异配置检出变化像素并拒绝发布、门禁 run 确定性与历史复现、发布后配置可选与不可变文件名、期望版本号 409、撤回/恢复状态机、审计哈希链与 UPDATE/DELETE 触发器拦截），以及局部 CMYK 修色（零偏移精确命中、达标成品 TIFF 选区外逐字节不变且嵌入原印刷 ICC、未达容差/无可行解不可达且不产出成品、参数/坐标校验、印刷 ICC 篡改与缺失返回 409、retouch_id 确定性、通道越界为硬约束、可行性筛选对暴力法的等价性、择优次序、64×64 选区穷举）。

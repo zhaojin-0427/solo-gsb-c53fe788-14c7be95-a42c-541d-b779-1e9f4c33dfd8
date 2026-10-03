@@ -189,7 +189,17 @@ def _profile_to_bytes(handle: ctypes.c_void_p) -> bytes:
     buf = ctypes.create_string_buffer(size.value)
     if not L.cmsSaveProfileToMem(handle, buf, ctypes.byref(size)):
         raise RuntimeError("保存 ICC profile 到内存失败")
-    return buf.raw[: size.value]
+    raw = bytearray(buf.raw[: size.value])
+    # ICC header bytes 24..35 are the profile creation date/time
+    # (u16 year/month/day/hour/minute/second). lcms stamps wall-clock time at
+    # profile creation, which would make our *synthesized* built-ins
+    # (sRGB/Lab/demo CMYK/demo gray) byte-different on every restart: profile
+    # files would be rewritten and their SHA-256 digests would drift, breaking
+    # job/report bindings ("摘要不符") and byte-level determinism. Zero the
+    # field so generated profiles are content-addressed and reproducible.
+    # User-supplied ICC bytes never pass through this function.
+    raw[24:36] = b"\x00" * 12
+    return bytes(raw)
 
 
 def build_lab_profile_bytes() -> bytes:
@@ -311,6 +321,68 @@ def _channel_count(color_space: str) -> int:
 def _type_channels(pixel_type: int) -> int:
     # CHANNELS_SH occupies bits 3..10 of the type signature.
     return (int(pixel_type) >> 3) & 0x7F
+
+
+class DeviceToLabTransform:
+    """Reusable device-uint8 -> ``TYPE_Lab_DBL`` transform.
+
+    Profiles and the lcms transform are opened once; :meth:`apply_many` may
+    then be called repeatedly (e.g. once per candidate chunk of the local
+    CMYK correction search) without paying transform build-up cost each time.
+    """
+
+    def __init__(self, src_profile: bytes, src_cs: str, intent: str):
+        if intent not in INTENTS:
+            raise RuntimeError(f"未知渲染意图: {intent}")
+        self._src_profile = src_profile
+        self._src_cs = src_cs
+        self._channels = _channel_count(src_cs)
+        self._intent = intent
+        self._stack: contextlib.ExitStack | None = None
+        self._xform: ctypes.c_void_p | None = None
+
+    def __enter__(self) -> "DeviceToLabTransform":
+        L = lcms()
+        self._stack = contextlib.ExitStack()
+        h_src, h_lab = self._stack.enter_context(
+            _open_profiles(self._src_profile, _lab_profile_bytes())
+        )
+        self._xform = L.cmsCreateTransform(
+            h_src, ctypes.c_uint32(_pixel_type(self._src_cs)),
+            h_lab, ctypes.c_uint32(_TYPE_LAB_DBL),
+            ctypes.c_uint32(INTENTS[self._intent]), ctypes.c_uint32(0),
+        )
+        if not self._xform:
+            self._stack.close()
+            self._stack = None
+            raise RuntimeError("lcms 无法建立 CMYK→Lab 色彩转换")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._xform is not None:
+            lcms().cmsDeleteTransform(self._xform)
+            self._xform = None
+        if self._stack is not None:
+            self._stack.close()
+            self._stack = None
+
+    def apply_many(self, pixels: np.ndarray) -> np.ndarray:
+        """Transform an (N, C) uint8 array; return (N, 3) float64 Lab (D50)."""
+        if self._xform is None:
+            raise RuntimeError("DeviceToLabTransform 尚未进入上下文")
+        flat = np.ascontiguousarray(pixels, dtype=np.uint8).reshape(-1)
+        n_pixels = flat.size // self._channels
+        out = np.zeros(n_pixels * 3, dtype=np.float64)
+        lcms().cmsDoTransform(
+            self._xform,
+            flat.ctypes.data_as(ctypes.c_void_p),
+            out.ctypes.data_as(ctypes.c_void_p),
+            ctypes.c_uint32(n_pixels),
+        )
+        return out.reshape(n_pixels, 3)
 
 
 def pixels_to_lab(pixels: np.ndarray, src_cs: str, src_profile: bytes,

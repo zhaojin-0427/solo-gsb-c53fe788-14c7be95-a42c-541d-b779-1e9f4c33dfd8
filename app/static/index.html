@@ -83,6 +83,13 @@
       <button type="button" id="runBtn" class="primary">生成软打样</button>
       <span id="busy" class="hint" hidden>处理中…</span>
     </div>
+    <div class="row saved-jobs">
+      <label>从已保存任务打开（可直接框选修色）
+        <select id="savedJobSelect"></select>
+      </label>
+      <button type="button" id="loadSavedBtn">打开已保存任务</button>
+      <button type="button" id="refreshSavedBtn" class="btn">刷新列表</button>
+    </div>
     <div id="errorBox" class="error" hidden></div>
   </section>
 
@@ -106,6 +113,55 @@
     <div id="regionPanel" class="region" hidden>
       <h3>框选区域分析</h3>
       <pre id="regionData"></pre>
+    </div>
+
+    <!-- ================= 局部 CMYK 修色 ================= -->
+    <div id="retouchPanel" class="region retouch" hidden>
+      <h3>局部 CMYK 修色（统一整数偏移搜索）</h3>
+      <div class="hint">
+        以当前已保存任务的原分色结果为起点、按原印刷 ICC 搜索一个对框选区域内
+        <b>每个像素统一</b>施加的整数 CMYK 偏移。先在图上框选不超过
+        <b>64×64</b> 像素的矩形，再填写下列约束。
+      </div>
+      <div class="retouch-grid">
+        <label>选区 X
+          <input type="number" id="rtX" min="0" step="1">
+        </label>
+        <label>选区 Y
+          <input type="number" id="rtY" min="0" step="1">
+        </label>
+        <label>宽 (≤64)
+          <input type="number" id="rtW" min="1" max="64" step="1">
+        </label>
+        <label>高 (≤64)
+          <input type="number" id="rtH" min="1" max="64" step="1">
+        </label>
+        <label>目标 L (0–100)
+          <input type="number" id="rtL" min="0" max="100" step="0.01">
+        </label>
+        <label>目标 a (−128–127)
+          <input type="number" id="rtA" min="-128" max="127" step="0.01">
+        </label>
+        <label>目标 b (−128–127)
+          <input type="number" id="rtB" min="-128" max="127" step="0.01">
+        </label>
+        <label>ΔE00 容差 (≥0)
+          <input type="number" id="rtTol" min="0" step="0.01" value="2">
+        </label>
+        <label>通道偏移上限 (0–8)
+          <input type="number" id="rtShift" min="0" max="8" step="1" value="8">
+        </label>
+        <label>总墨量上限 (0–1020)
+          <input type="number" id="rtInk" min="0" max="1020" step="1" value="1020">
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" id="rtFillBefore" class="btn">用选区修色前平均 Lab 填充目标</button>
+        <button type="button" id="rtRun" class="primary">搜索统一 CMYK 偏移</button>
+        <span id="rtBusy" class="hint" hidden>搜索中（最坏情形可能需数十秒）…</span>
+      </div>
+      <div id="rtError" class="error" hidden></div>
+      <div id="rtResult" hidden></div>
     </div>
 
     <div class="exports">
@@ -164,5 +220,6 @@
 
 <script src="/app.js"></script>
 <script src="/release.js"></script>
+<script src="/retouch.js"></script>
 </body>
 </html>

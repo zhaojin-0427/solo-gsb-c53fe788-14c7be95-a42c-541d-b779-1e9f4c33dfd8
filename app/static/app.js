@@ -126,6 +126,7 @@ $("runBtn").addEventListener("click", async () => {
     const job = await api("/api/jobs", { method: "POST", body: fd });
     state.job = job;
     renderJob();
+    loadSavedJobs("savedJobSelect").catch(() => {});
   } catch (err) {
     showError(err.message);
   } finally {
@@ -149,6 +150,7 @@ function renderJob() {
 
   $("reportJson").textContent = JSON.stringify(job.report, null, 2);
   setView("preview");
+  window.dispatchEvent(new CustomEvent("spd:job-changed"));
 
   const base = `/api/jobs/${job.job_id}`;
   $("expPreview").href = `${base}/images/preview.png`;
@@ -250,6 +252,10 @@ function drawRect(x0d, y0d, x1d, y1d) {
 }
 
 async function queryRegion(x, y, w, h) {
+  // 通知局部修色面板当前选区（retouch.js 监听）。
+  window.dispatchEvent(new CustomEvent("spd:region", {
+    detail: { x, y, width: w, height: h },
+  }));
   try {
     const data = await api(`/api/jobs/${state.job.job_id}/region`, {
       method: "POST",
@@ -263,5 +269,91 @@ async function queryRegion(x, y, w, h) {
     $("regionData").textContent = "区域查询失败：" + err.message;
   }
 }
+
+// ---- 已保存任务：列出 / 打开 ----------------------------------------------
+async function loadSavedJobs(selectId) {
+  const select = $(selectId);
+  if (!select) return;
+  try {
+    const jobs = await api("/api/jobs");
+    select.innerHTML = "";
+    if (!jobs.length) {
+      const opt = document.createElement("option");
+      opt.textContent = "（暂无已保存任务，请先生成软打样）";
+      opt.value = "";
+      select.appendChild(opt);
+      return;
+    }
+    for (const j of jobs) {
+      const opt = document.createElement("option");
+      opt.value = j.job_id;
+      opt.textContent =
+        `${j.width}×${j.height} ${j.image_mode} · ΔE均${Number(j.de_mean).toFixed(2)} · ` +
+        `${j.job_id.slice(0, 10)}… · ${j.created_at || ""}`;
+      select.appendChild(opt);
+    }
+  } catch (err) {
+    showError("加载已保存任务失败: " + err.message);
+  }
+}
+
+async function openSavedJob(jobId) {
+  const report = await api(`/api/jobs/${jobId}`);
+  const base = `/api/jobs/${jobId}`;
+  state.job = {
+    job_id: jobId,
+    width: report.image.width,
+    height: report.image.height,
+    stats: report.stats,
+    report,
+    images: {
+      preview: `${base}/images/preview.png`,
+      softproof: `${base}/images/softproof.png`,
+      heatmap: `${base}/images/heatmap.png`,
+      overlay: `${base}/images/overlay.png`,
+      mask: `${base}/images/mask.png`,
+    },
+  };
+  renderSavedJob();
+}
+
+function renderSavedJob() {
+  const job = state.job;
+  $("resultsPanel").hidden = false;
+  const s = job.stats;
+  const pct = (s.over_ratio * 100).toFixed(3);
+  $("statsBar").innerHTML =
+    `<span>均值 ΔE00 <b>${s.mean.toFixed(2)}</b></span>` +
+    `<span>P95 <b>${s.p95.toFixed(2)}</b></span>` +
+    `<span>最大 <b>${s.max.toFixed(2)}</b></span>` +
+    `<span>阈值 ${s.threshold} 超阈面积 <b>${pct}%</b></span>` +
+    `<span>超阈像素 ${s.over_pixels.toLocaleString()} / ${s.total_pixels.toLocaleString()}</span>` +
+    `<span>任务 <code>${job.job_id.slice(0, 12)}…</code>（已保存）</span>`;
+  $("reportJson").textContent = JSON.stringify(job.report, null, 2);
+  setView("preview");
+  window.dispatchEvent(new CustomEvent("spd:job-changed"));
+  const base = `/api/jobs/${job.job_id}`;
+  $("expPreview").href = `${base}/images/preview.png`;
+  $("expProof").href = `${base}/images/softproof.png`;
+  $("expHeat").href = `${base}/images/heatmap.png`;
+  $("expMask").href = `${base}/images/mask.png`;
+  $("expReport").href = `${base}/report`;
+  $("expZip").href = `${base}/export.zip`;
+  for (const a of ["expPreview", "expProof", "expHeat", "expMask"]) $(a).download = $(a).href.split("/").pop();
+  $("expReport").download = `${job.job_id.slice(0, 12)}-report.json`;
+}
+
+loadSavedJobs("savedJobSelect").catch(() => {});
+$("refreshSavedBtn").addEventListener("click", () => loadSavedJobs("savedJobSelect"));
+$("loadSavedBtn").addEventListener("click", async () => {
+  const id = $("savedJobSelect").value;
+  if (!id) return;
+  showError("");
+  try {
+    await openSavedJob(id);
+  } catch (err) {
+    showError("打开已保存任务失败：" + err.message);
+  }
+});
 
 loadProfiles().catch((e) => showError("加载配置列表失败: " + e.message));

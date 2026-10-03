@@ -14,6 +14,7 @@ from . import database as db
 from . import pipeline as pl
 from . import regions as regions_mod
 from . import releases
+from . import retouch
 from .release_api import router as release_router
 from .config import (
     DB_PATH,
@@ -296,6 +297,75 @@ async def inspect_region(job_id: str, payload: dict):
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# API: 局部 CMYK 修色
+# ---------------------------------------------------------------------------
+
+_RETTOUCH_IMAGES = {
+    "before_crop.png": "image/png",
+    "after_crop.png": "image/png",
+    "after.png": "image/png",
+}
+
+
+@app.post("/api/jobs/{job_id}/retouch")
+async def create_retouch(job_id: str, payload: dict):
+    base = _require_job(job_id)
+    state = app.state.state
+    try:
+        return retouch.run_retouch(job_id, payload, state.pm)
+    except retouch.RetouchUnreachable as exc:
+        # 原任务 ICC 缺失或摘要不符——必须拒绝（409，与发布模块的冲突语义一致）。
+        raise HTTPException(409, str(exc))
+    except retouch.RetouchError as exc:
+        raise HTTPException(422, str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, f"任务产物缺失，无法修色: {exc}")
+
+
+def _retouch_dir(job_id: str, retouch_id: str) -> Path:
+    base = _require_job(job_id)
+    d = base / "retouch" / retouch_id
+    if not (d / "retouch.json").exists():
+        raise HTTPException(404, "修色结果不存在")
+    return d
+
+
+@app.get("/api/jobs/{job_id}/retouch/{retouch_id}")
+def get_retouch(job_id: str, retouch_id: str):
+    d = _retouch_dir(job_id, retouch_id)
+    return JSONResponse(json.loads((d / "retouch.json").read_text("utf-8")))
+
+
+@app.get("/api/jobs/{job_id}/retouch/{retouch_id}/images/{name}")
+def get_retouch_image(job_id: str, retouch_id: str, name: str):
+    d = _retouch_dir(job_id, retouch_id)
+    if name not in _RETTOUCH_IMAGES or not (d / name).exists():
+        raise HTTPException(404, "图像不存在")
+    return FileResponse(d / name, media_type=_RETTOUCH_IMAGES[name])
+
+
+@app.get("/api/jobs/{job_id}/retouch/{retouch_id}/corrected_cmyk.tif")
+def get_retouch_tiff(job_id: str, retouch_id: str):
+    d = _retouch_dir(job_id, retouch_id)
+    tif = d / "corrected_cmyk.tif"
+    if not tif.exists():
+        raise HTTPException(404, "成品不存在（未达容差或无可行解时不生成 TIFF）")
+    return FileResponse(
+        tif, media_type="image/tiff", filename=f"{job_id[:12]}-corrected-cmyk.tif"
+    )
+
+
+@app.get("/api/jobs/{job_id}/retouch/{retouch_id}/correction_report.json")
+def get_retouch_report(job_id: str, retouch_id: str):
+    d = _retouch_dir(job_id, retouch_id)
+    rep = d / "correction_report.json"
+    if not rep.exists():
+        raise HTTPException(404, "报告不存在（未达容差或无可行解时不生成成品报告）")
+    return FileResponse(rep, media_type="application/json",
+                        filename="correction_report.json")
 
 
 # Static frontend (mounted last so /api routes win).
