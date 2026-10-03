@@ -322,6 +322,49 @@ def pixels_to_lab(pixels: np.ndarray, src_cs: str, src_profile: bytes,
     )
 
 
+@contextlib.contextmanager
+def lab_transform(src_cs: str, src_profile: bytes, intent: str):
+    """Open a reusable device->Lab_DBL transform.
+
+    局部 CMYK 修色要对上万组候选偏移各回算一次选区 Lab；反复 create/delete
+    transform 的固定开销在小批量调用时占主导，因此调用方可在整个搜索期间
+    持有同一 transform（lcms DoTransform 对同一对象可重入、无内部游标）。
+
+    Usage::
+
+        with lab_transform("CMYK", press_bytes, intent) as xf:
+            labs = xf(cmyk_uint8_flat)
+    """
+    if intent not in INTENTS:
+        raise RuntimeError(f"未知渲染意图: {intent}")
+    L = lcms()
+    with _open_profiles(src_profile, _lab_profile_bytes()) as (h_src, h_lab):
+        xform = L.cmsCreateTransform(
+            h_src, _pixel_type(src_cs),
+            h_lab, ctypes.c_uint32(_TYPE_LAB_DBL),
+            ctypes.c_uint32(INTENTS[intent]), ctypes.c_uint32(0),
+        )
+        if not xform:
+            raise RuntimeError("lcms 无法建立色彩转换")
+
+        def run(pixels: np.ndarray) -> np.ndarray:
+            flat = np.ascontiguousarray(pixels, dtype=np.uint8).reshape(-1)
+            n_pixels = flat.size // _channel_count(src_cs)
+            out = np.zeros(n_pixels * 3, dtype=np.float64)
+            L.cmsDoTransform(
+                xform,
+                flat.ctypes.data_as(ctypes.c_void_p),
+                out.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_uint32(n_pixels),
+            )
+            return out.reshape(n_pixels, 3)
+
+        try:
+            yield run
+        finally:
+            L.cmsDeleteTransform(xform)
+
+
 def pixels_to_rgb(pixels: np.ndarray, src_cs: str, src_profile: bytes,
                   display_profile: bytes, intent: str) -> np.ndarray:
     """Device pixels -> N x 3 uint8 RGB under `display_profile`."""

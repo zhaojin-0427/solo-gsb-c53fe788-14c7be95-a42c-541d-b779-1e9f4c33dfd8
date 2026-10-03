@@ -17,9 +17,13 @@ document.querySelectorAll(".navbtn").forEach((btn) => {
     );
     const v = btn.dataset.view;
     $("view-softproof").hidden = v !== "softproof";
+    $("view-retouch").hidden = v !== "retouch";
     $("view-release").hidden = v !== "release";
     if (v === "release" && typeof refreshReleaseView === "function") {
       refreshReleaseView();
+    }
+    if (v === "retouch" && typeof refreshRetouchView === "function") {
+      refreshRetouchView();
     }
   });
 });

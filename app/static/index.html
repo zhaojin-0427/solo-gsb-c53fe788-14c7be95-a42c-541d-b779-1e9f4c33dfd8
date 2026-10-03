@@ -13,6 +13,7 @@
   <div class="subtitle">LittleCMS 色彩管理 · CIEDE2000 像素级色差 · 源→印刷→显示全链路软打样</div>
   <nav class="topnav">
     <button class="navbtn active" data-view="softproof">软打样</button>
+    <button class="navbtn" data-view="retouch">局部 CMYK 修色</button>
     <button class="navbtn" data-view="release">印刷配置版本发布与回归门禁</button>
   </nav>
 </header>
@@ -125,7 +126,85 @@
   </section>
 </main>
 
-<!-- ================= 视图二：发布与回归门禁（新增） ================= -->
+<!-- ================= 视图二：局部 CMYK 修色 ================= -->
+<main id="view-retouch" class="view" hidden>
+  <section class="panel controls">
+    <h2>1. 选择已保存任务</h2>
+    <div class="row">
+      <select id="rtJobSelect"></select>
+      <button type="button" id="rtRefreshJobs" class="btn">刷新任务列表</button>
+    </div>
+    <div id="rtJobMeta" class="hint"></div>
+
+    <h2>2. 框选修色选区（≤ 64×64 像素）</h2>
+    <div class="canvas-wrap" id="rtCanvasWrap">
+      <img id="rtViewImage" alt="已保存任务软打样">
+      <canvas id="rtRoiCanvas"></canvas>
+    </div>
+    <div class="hint">在软打样图上拖拽框选矩形；选区任一边不得超过 64 像素。</div>
+    <div class="row">
+      <label>x <input type="number" id="rtX" min="0" value="0"></label>
+      <label>y <input type="number" id="rtY" min="0" value="0"></label>
+      <label>宽 <input type="number" id="rtW" min="1" max="64" value="16"></label>
+      <label>高 <input type="number" id="rtH" min="1" max="64" value="16"></label>
+    </div>
+
+    <h2>3. 修色目标与约束</h2>
+    <div class="formgrid">
+      <label>目标 L*（0–100）
+        <input type="number" id="rtLabL" min="0" max="100" step="0.01" value="50">
+      </label>
+      <label>目标 a*（-128–127）
+        <input type="number" id="rtLabA" min="-128" max="127" step="0.01" value="0">
+      </label>
+      <label>目标 b*（-128–127）
+        <input type="number" id="rtLabB" min="-128" max="127" step="0.01" value="0">
+      </label>
+      <label>ΔE00 容差（≥ 0）
+        <input type="number" id="rtTol" min="0" step="0.1" value="3">
+      </label>
+      <label>单通道偏移绝对值上限（0–8 整数）
+        <input type="number" id="rtMaxShift" min="0" max="8" step="1" value="4">
+      </label>
+      <label>总墨量上限 C+M+Y+K（0–1020）
+        <input type="number" id="rtTac" min="0" max="1020" step="1" value="900">
+      </label>
+    </div>
+
+    <div class="row">
+      <button type="button" id="rtRunBtn" class="primary">搜索统一 CMYK 偏移</button>
+      <span id="rtBusy" class="hint" hidden>搜索中…</span>
+    </div>
+    <div id="rtError" class="error" hidden></div>
+  </section>
+
+  <section class="panel" id="rtResultPanel" hidden>
+    <h2>修色结果</h2>
+    <div id="rtStatus" class="rt-status"></div>
+    <div class="stats" id="rtStats"></div>
+    <div class="rt-proofs">
+      <figure>
+        <figcaption>修色前软打样（选区）</figcaption>
+        <img id="rtBeforeImg" alt="修色前">
+      </figure>
+      <figure>
+        <figcaption>修色后软打样（选区）</figcaption>
+        <img id="rtAfterImg" alt="修色后">
+      </figure>
+    </div>
+    <div id="rtResidual" class="region"></div>
+    <div class="exports">
+      <a id="rtExpTiff" class="btn primary" hidden download>下载修色 CMYK TIFF（嵌入印刷 ICC）</a>
+      <a id="rtExpReport" class="btn" download>下载修色报告 JSON</a>
+    </div>
+    <details class="reportbox">
+      <summary>查看修色报告</summary>
+      <pre id="rtReportJson"></pre>
+    </details>
+  </section>
+</main>
+
+<!-- ================= 视图三：发布与回归门禁（新增） ================= -->
 <main id="view-release" class="view" hidden>
   <section class="panel" id="relLeft">
     <div class="rel-head">
@@ -163,6 +242,7 @@
 </footer>
 
 <script src="/app.js"></script>
+<script src="/retouch.js"></script>
 <script src="/release.js"></script>
 </body>
 </html>

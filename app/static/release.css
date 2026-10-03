@@ -118,3 +118,45 @@ input[type=text] {
 label.inline { flex-direction: row; align-items: center; gap: 6px; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
 .small { font-size: 12px; color: #7a828f; }
+
+/* 局部 CMYK 修色视图 */
+#view-retouch {
+  grid-template-columns: 420px 1fr;
+}
+.rt-status {
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  margin: 10px 0;
+}
+.rt-status.reachable {
+  background: #ecf8f0;
+  border: 1px solid #9ad4b0;
+  color: #1f6b3d;
+}
+.rt-status.unreachable {
+  background: #fdecec;
+  border: 1px solid #e0a4a4;
+  color: #a02525;
+}
+.rt-proofs {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.rt-proofs figure {
+  margin: 0;
+  text-align: center;
+}
+.rt-proofs img {
+  max-width: 320px;
+  max-height: 320px;
+  border: 1px solid #c7ccd6;
+  border-radius: 6px;
+  image-rendering: pixelated;
+  background:
+    repeating-conic-gradient(#eee 0% 25%, #fafafa 0% 50%) 0 0/16px 16px;
+}
+.rt-proofs figcaption { font-size: 12px; color: #555; margin-bottom: 4px; }
+#rtCanvasWrap { min-height: 240px; }

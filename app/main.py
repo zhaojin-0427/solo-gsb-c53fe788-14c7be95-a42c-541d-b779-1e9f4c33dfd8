@@ -20,9 +20,11 @@ from .config import (
     JOB_DIR,
     MAX_DIMENSION,
     MAX_UPLOAD_MB,
+    RETOUCH_DIR,
     init_state,
 )
 from .profiles import ProfileError
+from . import retouch as rt
 
 
 @asynccontextmanager
@@ -39,7 +41,7 @@ async def lifespan(app: FastAPI):
     conn.close()
 
 
-app = FastAPI(title="印前色彩软打样台", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="印前色彩软打样台", version="1.2.0", lifespan=lifespan)
 app.include_router(release_router)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -176,6 +178,11 @@ async def create_job(
         "proof_intent": proof_intent,
         "threshold": threshold,
         "use_embedded": use_embedded,
+        # 全 64 位配置摘要随任务固化：局部修色必须用同一 ICC 字节，
+        # 摘要不符即拒绝。
+        "source_profile_sha256": result.profile_summaries["source"]["sha256"],
+        "press_profile_sha256": result.profile_summaries["press"]["sha256"],
+        "display_profile_sha256": result.profile_summaries["display"]["sha256"],
     }
     (base / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
 
@@ -296,6 +303,164 @@ async def inspect_region(job_id: str, payload: dict):
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# API: 局部 CMYK 修色（以已保存任务分色结果为起点）
+# ---------------------------------------------------------------------------
+
+def _retouch_dir(retouch_id: str) -> Path:
+    d = RETOUCH_DIR / retouch_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@app.post("/api/retouch")
+def create_retouch(payload: dict | None = None):
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "请求体必须是 JSON 对象")
+    try:
+        req = rt.validate_request(payload)
+    except rt.RetouchError as exc:
+        raise HTTPException(422, str(exc))
+
+    job_base = JOB_DIR / req.job_id
+    if not (job_base / "meta.json").exists():
+        raise HTTPException(404, "原任务不存在或已被删除")
+
+    try:
+        ctx = rt.load_job_context(job_base)
+    except rt.RetouchError as exc:
+        raise HTTPException(422, str(exc))
+    meta = ctx["meta"]
+
+    state = app.state.state
+    # 原任务印刷 ICC：必须存在且 SHA-256 与任务记录严格一致。
+    row = db.get_job(app.state.db, req.job_id)
+    recorded_press_digest = None
+    if row is not None and row["profile_digests_json"]:
+        try:
+            recorded_press_digest = json.loads(row["profile_digests_json"]).get("press")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            recorded_press_digest = None
+    recorded_press_digest = recorded_press_digest or meta.get("press_profile_sha256")
+
+    press_profile_id = meta["press_profile"]
+    try:
+        press_bytes = state.pm.load_bytes(press_profile_id)
+        rt.verify_press_profile(press_bytes, recorded_press_digest)
+        # 摘要通过后补名称等元数据，报告仍以哈希为绑定凭据。
+        press_summary_full = pl.summary_from_bytes(press_bytes, press_profile_id)
+    except ProfileError as exc:
+        raise HTTPException(422, f"原任务印刷 ICC 缺失，无法修色: {exc}")
+    except rt.RetouchError as exc:
+        raise HTTPException(422, str(exc))
+
+    display_profile_id = meta["display_profile"]
+    recorded_display_digest = meta.get("display_profile_sha256")
+    try:
+        display_bytes = state.pm.load_bytes(display_profile_id)
+        display_summary_full = pl.summary_from_bytes(display_bytes, display_profile_id)
+    except ProfileError as exc:
+        raise HTTPException(422, f"原任务显示 ICC 缺失，无法生成软打样: {exc}")
+    if recorded_display_digest and display_summary_full["sha256"] != recorded_display_digest:
+        raise HTTPException(
+            422,
+            "原任务显示 ICC 摘要不符，无法按原显示配置呈现修色软打样，拒绝修色",
+        )
+
+    retouch_id = rt.compute_retouch_id(meta, req)
+    base = _retouch_dir(retouch_id)
+    report_path = base / "report.json"
+    if report_path.exists():
+        report = json.loads(report_path.read_text("utf-8"))
+    else:
+        try:
+            result = rt.run_retouch(req, ctx, press_bytes)
+        except rt.RetouchError as exc:
+            raise HTTPException(422, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(422, f"LittleCMS 色彩转换失败: {exc}")
+
+        try:
+            pngs = rt.render_proof_crops(
+                result, ctx["cmyk"], press_bytes, display_bytes,
+                meta.get("proof_intent", "relative_colorimetric"),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(422, f"软打样渲染失败: {exc}")
+        (base / "before.png").write_bytes(pngs["before.png"])
+        (base / "after.png").write_bytes(pngs["after.png"])
+
+        report = rt.build_report(
+            retouch_id, meta, press_summary_full, display_summary_full, req, result
+        )
+        if result["reachable"]:
+            tiff = rt.export_retouched_tiff(result["_cmyk_adjusted"], press_bytes)
+            (base / "retouched.tif").write_bytes(tiff)
+        else:
+            # 不可达：显式不生成成品（若历史脏文件存在则移除）。
+            stale = base / "retouched.tif"
+            if stale.exists():
+                stale.unlink()
+
+        report_path.write_text(
+            json.dumps(report, sort_keys=True, ensure_ascii=False, indent=2),
+            "utf-8",
+        )
+
+    return {
+        "retouch_id": retouch_id,
+        "reachable": report["reachable"],
+        "rect": report["region"],
+        "best_offset_cmyk": report["best_offset_cmyk"],
+        "best_abs_shift_sum": report["best_abs_shift_sum"],
+        "feasible_offset_count": report["search"]["feasible_offset_count"],
+        "residual": report["residual"],
+        "constraints": report["constraints"],
+        "images": {
+            "before": f"/api/retouch/{retouch_id}/before.png",
+            "after": f"/api/retouch/{retouch_id}/after.png",
+        },
+        "tiff": (
+            f"/api/retouch/{retouch_id}/retouched.tif"
+            if report["reachable"] else None
+        ),
+        "report_url": f"/api/retouch/{retouch_id}/report",
+        "report": report,
+    }
+
+
+def _require_retouch(retouch_id: str) -> Path:
+    base = RETOUCH_DIR / retouch_id
+    if not (base / "report.json").exists():
+        raise HTTPException(404, "修色任务不存在")
+    return base
+
+
+@app.get("/api/retouch/{retouch_id}/report")
+def get_retouch_report(retouch_id: str):
+    base = _require_retouch(retouch_id)
+    return FileResponse(
+        base / "report.json", media_type="application/json", filename="retouch-report.json"
+    )
+
+
+@app.get("/api/retouch/{retouch_id}/{name}")
+def get_retouch_artifact(retouch_id: str, name: str):
+    base = _require_retouch(retouch_id)
+    if name in ("before.png", "after.png"):
+        return FileResponse(base / name, media_type="image/png")
+    if name == "retouched.tif":
+        report = json.loads((base / "report.json").read_text("utf-8"))
+        if not report.get("reachable") or not (base / "retouched.tif").exists():
+            # 不可达不产出成品。
+            raise HTTPException(422, "无可行解或未达容差：标记为不可达，未生成成品 TIFF")
+        return FileResponse(
+            base / "retouched.tif", media_type="image/tiff",
+            filename=f"retouched-{retouch_id[:12]}.tif",
+        )
+    raise HTTPException(404, "产物不存在")
 
 
 # Static frontend (mounted last so /api routes win).
